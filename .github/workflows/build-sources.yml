@@ -54,9 +54,8 @@ jobs:
       - name: Clone and build aidoku-js
         run: |
           git clone --depth=1 https://github.com/nemu-pm/aidoku-js.git .aidoku-js
-          cd .aidoku-js
-          bun install
-          cd runtime && bun run build
+          cd .aidoku-js/runtime && bun install && bun run build
+          cd ../cli && bun install
       
       - name: Install dependencies
         run: bun install --ignore-scripts
