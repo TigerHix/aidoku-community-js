@@ -245,7 +245,7 @@ jobs:
           <!DOCTYPE html>
           <html>
           <head>
-            <title>Aitoku Community Sources</title>
+            <title>Aidoku Community Sources</title>
             <meta charset="utf-8">
             <style>
               body { font-family: system-ui; max-width: 800px; margin: 2rem auto; padding: 1rem; }
@@ -257,7 +257,7 @@ jobs:
             </style>
           </head>
           <body>
-            <h1>Aitoku Community Sources</h1>
+            <h1>Aidoku Community Sources</h1>
           HTMLEOF
           
           echo "  <p class=\"stats\">$TOTAL sources available (with author metadata)</p>" >> dist/index.html
