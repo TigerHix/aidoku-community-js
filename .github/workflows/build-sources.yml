@@ -10,6 +10,8 @@ on:
         required: false
         default: false
         type: boolean
+  repository_dispatch:
+    types: [aidoku-js-update]
   push:
     branches: [main]
     paths:
@@ -49,8 +51,15 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
       
+      - name: Clone and build aidoku-js
+        run: |
+          git clone --depth=1 https://github.com/nemu-pm/aidoku-js.git .aidoku-js
+          cd .aidoku-js
+          bun install
+          cd runtime && bun run build
+      
       - name: Install dependencies
-        run: bun install
+        run: bun install --ignore-scripts
       
       - name: Create aidoku config
         run: |
@@ -86,7 +95,7 @@ jobs:
               echo "Testing $SOURCE_ID ($SOURCE_NAME)..."
               
               TEST_START=$(date +%s%3N)
-              RAW_OUT=$(timeout 90 bunx aidoku test all "$SOURCE_ID" --json 2>&1 || true)
+              RAW_OUT=$(timeout 90 bun .aidoku-js/cli/bin.ts test all "$SOURCE_ID" --json 2>&1 || true)
               TEST_TIME=$(($(date +%s%3N) - TEST_START))
               # Extract JSON from output (skip download/cache messages)
               TEST_OUT=$(echo "$RAW_OUT" | sed -n '/^{/,$p')
@@ -177,7 +186,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
       
       - name: Install dependencies
-        run: bun install
+        run: bun install --ignore-scripts
       
       - name: Download build results
         if: needs.build.result == 'success'

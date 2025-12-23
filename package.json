@@ -9,7 +9,6 @@
     "report": "bun scripts/generate-build-report.ts"
   },
   "devDependencies": {
-    "@nemu.pm/aidoku-cli": "latest",
     "@types/bun": "latest"
   }
 }
