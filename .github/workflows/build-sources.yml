@@ -1,0 +1,309 @@
+name: Build Sources
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip source tests'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'data/**'
+      - '.github/workflows/build-sources.yml'
+
+concurrency:
+  group: build-sources
+  cancel-in-progress: true
+
+
+jobs:
+  # ============================================================================
+  # Build registry and test sources
+  # ============================================================================
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Clone source repos
+        run: |
+          mkdir -p repos
+          for repo in $(jq -r '.[].repo' data/registries.json); do
+            name=$(echo "$repo" | sed 's|https://github.com/||')
+            echo "Cloning $name..."
+            git clone --depth=1000 "$repo" "repos/$name"
+          done
+      
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      
+      - name: Install dependencies
+        run: bun install
+      
+      - name: Create aidoku config
+        run: |
+          jq -r '.[].url' data/registries.json | jq -R -s 'split("\n") | map(select(. != "")) | {registries: .}' > aidoku.config.json
+      
+      - name: Fetch upstream registries
+        run: bun run fetch
+      
+      - name: Test sources (chunk ${{ matrix.chunk }})
+        if: ${{ inputs.skip_tests != true }}
+        continue-on-error: true
+        run: |
+          mkdir -p .cache/build-results
+          RESULTS_FILE=".cache/build-results/chunk-${{ matrix.chunk }}.json"
+          echo '{"chunk": ${{ matrix.chunk }}, "sources": [' > "$RESULTS_FILE"
+          FIRST=true
+          
+          # Collect all sources from all registries
+          for reg_id in $(jq -r '.[].id' data/registries.json); do
+            UPSTREAM="dist/$reg_id/upstream.json"
+            [ -f "$UPSTREAM" ] || continue
+            
+            SOURCES=$(jq -r '.sources[].id' "$UPSTREAM")
+            TOTAL=$(echo "$SOURCES" | wc -l)
+            CHUNK_SIZE=$(( (TOTAL + 3) / 4 ))
+            START=$(( ${{ matrix.chunk }} * CHUNK_SIZE + 1 ))
+            END=$(( START + CHUNK_SIZE - 1 ))
+            
+            CHUNK_SOURCES=$(echo "$SOURCES" | sed -n "${START},${END}p")
+            
+            for SOURCE_ID in $CHUNK_SOURCES; do
+              SOURCE_NAME=$(jq -r --arg id "$SOURCE_ID" '.sources[] | select(.id == $id) | .name' "$UPSTREAM")
+              echo "Testing $SOURCE_ID ($SOURCE_NAME)..."
+              
+              TEST_START=$(date +%s%3N)
+              TEST_OUT=$(timeout 90 bunx aidoku test all "$SOURCE_ID" --json 2>&1 || echo '{"summary":{"failed":1},"error":"timeout or crash"}')
+              TEST_TIME=$(($(date +%s%3N) - TEST_START))
+              
+              if echo "$TEST_OUT" | jq . >/dev/null 2>&1; then
+                PASSED=$(echo "$TEST_OUT" | jq -r '.summary.passed // 0')
+                FAILED=$(echo "$TEST_OUT" | jq -r '.summary.failed // 0')
+                RESULTS_ARR=$(echo "$TEST_OUT" | jq -c '.results // []')
+                
+                if [ "$FAILED" = "0" ]; then
+                  STATUS="pass"
+                  echo "  ✅ passed ($PASSED tests)"
+                else
+                  STATUS="fail"
+                  FAILED_TESTS=$(echo "$TEST_OUT" | jq -r '[.results[] | select(.passed == false) | .test] | join(", ")')
+                  echo "  ❌ failed: $FAILED_TESTS"
+                fi
+              else
+                STATUS="error"
+                PASSED=0
+                FAILED=1
+                RESULTS_ARR='[]'
+                echo "  ⚠️ error"
+              fi
+              
+              [ "$FIRST" = true ] && FIRST=false || echo ',' >> "$RESULTS_FILE"
+              
+              cat >> "$RESULTS_FILE" << EOF
+            {"id": "$SOURCE_ID", "name": "$SOURCE_NAME", "registry": "$reg_id", "test": {"status": "$STATUS", "durationMs": $TEST_TIME, "summary": {"passed": $PASSED, "failed": $FAILED}, "results": $RESULTS_ARR}}
+          EOF
+            done
+          done
+          
+          echo ']}' >> "$RESULTS_FILE"
+      
+      - name: Generate summary
+        if: ${{ inputs.skip_tests != true }}
+        run: |
+          RESULTS_FILE=".cache/build-results/chunk-${{ matrix.chunk }}.json"
+          [ -f "$RESULTS_FILE" ] || exit 0
+          
+          echo "## Test Results (Chunk ${{ matrix.chunk }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | home | list | search | details | chapters | pages | image |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|------|--------|---------|----------|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          
+          jq -r '.sources[] | 
+            def test_icon(name): [.test.results[] | select(.test == name)] | if length == 0 then "—" elif .[0].passed then "✅" else "❌" end;
+            "| \(.id) | \(test_icon("home")) | \(test_icon("listings")) | \(test_icon("search")) | \(test_icon("details")) | \(test_icon("chapters")) | \(test_icon("pages")) | \(test_icon("image")) |"
+          ' "$RESULTS_FILE" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          PASSED=$(jq '[.sources[] | select(.test.status == "pass")] | length' "$RESULTS_FILE")
+          FAILED=$(jq '[.sources[] | select(.test.status != "pass")] | length' "$RESULTS_FILE")
+          echo "**Sources:** $PASSED passed, $FAILED failed" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Upload build results
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-results-${{ matrix.chunk }}
+          path: .cache/build-results/
+          retention-days: 1
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # Generate registry and deploy
+  # ============================================================================
+  registry:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Clone source repos
+        run: |
+          mkdir -p repos
+          for repo in $(jq -r '.[].repo' data/registries.json); do
+            name=$(echo "$repo" | sed 's|https://github.com/||')
+            echo "Cloning $name..."
+            git clone --depth=1000 "$repo" "repos/$name"
+          done
+      
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      
+      - name: Install dependencies
+        run: bun install
+      
+      - name: Download build results
+        if: needs.build.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          path: .cache/build-results/
+          pattern: build-results-*
+          merge-multiple: true
+      
+      - name: Fetch upstream registries
+        run: bun run fetch
+      
+      - name: Post-process registries
+        env:
+          REPOS_DIR: ${{ github.workspace }}/repos
+        run: bun run postprocess
+      
+      - name: Check for registry data
+        id: check
+        run: |
+          TOTAL=0
+          for reg_id in $(jq -r '.[].id' data/registries.json); do
+            if [ -f "dist/$reg_id/index.json" ]; then
+              COUNT=$(jq '.sources | length' "dist/$reg_id/index.json")
+              TOTAL=$((TOTAL + COUNT))
+            fi
+          done
+          
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "has_data=true" >> $GITHUB_OUTPUT
+            echo "Found $TOTAL sources to deploy"
+          else
+            echo "has_data=false" >> $GITHUB_OUTPUT
+            echo "No sources found - skipping deploy"
+          fi
+      
+      - name: Generate build report
+        if: steps.check.outputs.has_data == 'true'
+        run: bun run report || echo "Report skipped"
+      
+      - name: Generate summary
+        if: steps.check.outputs.has_data == 'true'
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f dist/build-report.json ]; then
+            PASSED=$(jq '.summary.passed' dist/build-report.json)
+            FAILED=$(jq '.summary.failed' dist/build-report.json)
+            TOTAL=$(jq '.summary.total' dist/build-report.json)
+            echo "**Passed:** $PASSED / $TOTAL | **Failed:** $FAILED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No test results available" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Create index page
+        if: steps.check.outputs.has_data == 'true'
+        run: |
+          TOTAL=0
+          for reg_id in $(jq -r '.[].id' data/registries.json); do
+            if [ -f "dist/$reg_id/index.json" ]; then
+              COUNT=$(jq '.sources | length' "dist/$reg_id/index.json")
+              TOTAL=$((TOTAL + COUNT))
+            fi
+          done
+          
+          cat > dist/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Aitoku Community Sources</title>
+            <meta charset="utf-8">
+            <style>
+              body { font-family: system-ui; max-width: 800px; margin: 2rem auto; padding: 1rem; }
+              a { color: #0066cc; }
+              code { background: #f4f4f4; padding: 0.2em 0.4em; border-radius: 3px; }
+              .stats { color: #666; }
+              .registry { margin: 1rem 0; padding: 1rem; border: 1px solid #ddd; border-radius: 8px; }
+              .registry h3 { margin-top: 0; }
+            </style>
+          </head>
+          <body>
+            <h1>Aitoku Community Sources</h1>
+          HTMLEOF
+          
+          echo "  <p class=\"stats\">$TOTAL sources available (with author metadata)</p>" >> dist/index.html
+          echo "  <h2>Registries</h2>" >> dist/index.html
+          
+          for row in $(jq -r '.[] | @base64' data/registries.json); do
+            id=$(echo "$row" | base64 -d | jq -r '.id')
+            name=$(echo "$row" | base64 -d | jq -r '.name')
+            repo=$(echo "$row" | base64 -d | jq -r '.repo')
+            
+            if [ -f "dist/$id/index.json" ]; then
+              count=$(jq '.sources | length' "dist/$id/index.json")
+              cat >> dist/index.html << EOF
+            <div class="registry">
+              <h3>$name</h3>
+              <p class="stats">$count sources</p>
+              <ul>
+                <li><a href="$id/index.json">index.json</a></li>
+                <li><a href="$id/index.min.json">index.min.json</a></li>
+              </ul>
+              <p>Upstream: <a href="$repo">$repo</a></p>
+            </div>
+          EOF
+            fi
+          done
+          
+          cat >> dist/index.html << 'HTMLEOF'
+            <h2>Test Report</h2>
+            <ul>
+              <li><a href="build-report.html">Build Report</a></li>
+            </ul>
+          </body>
+          </html>
+          HTMLEOF
+      
+      - name: Upload pages artifact
+        if: steps.check.outputs.has_data == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+      
+      - name: Deploy to GitHub Pages
+        if: steps.check.outputs.has_data == 'true'
+        uses: actions/deploy-pages@v4
+
+    permissions:
+      contents: write
+      pages: write
+      id-token: write

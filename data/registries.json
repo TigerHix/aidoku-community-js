@@ -1,0 +1,17 @@
+[
+  {
+    "id": "aidoku-community",
+    "name": "Aidoku Community Sources",
+    "url": "https://aidoku-community.github.io/sources/index.min.json",
+    "repo": "https://github.com/Aidoku-Community/sources",
+    "hasHistoricalCommits": true
+  },
+  {
+    "id": "aidoku-zh",
+    "name": "Aidoku ZH Sources",
+    "url": "https://raw.githubusercontent.com/suiyuran/aidoku-zh-sources/main/public/index.json",
+    "repo": "https://github.com/suiyuran/aidoku-zh-sources",
+    "hasHistoricalCommits": false
+  }
+]
+

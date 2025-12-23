@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Cache
+.cache/
+
+# IDE
+.idea/
+*.iml
+
+# Bun
+bun.lock
+
+# Cloned at build time
+repos/
+
