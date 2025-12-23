@@ -102,7 +102,7 @@ jobs:
                   echo "  ✅ passed ($PASSED tests)"
                 else
                   STATUS="fail"
-                  FAILED_TESTS=$(echo "$TEST_OUT" | jq -r '[.results[] | select(.passed == false) | .test] | join(", ")')
+                  FAILED_TESTS=$(echo "$TEST_OUT" | jq -r '[(.results // [])[] | select(.passed == false) | .test] | join(", ")')
                   echo "  ❌ failed: $FAILED_TESTS"
                 fi
               else
