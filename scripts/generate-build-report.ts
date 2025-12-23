@@ -59,7 +59,6 @@ const cacheDir = path.join(ROOT_DIR, ".cache/build-results");
 const distDir = path.join(ROOT_DIR, "dist");
 
 const allSources: SourceResult[] = [];
-const startTime = process.env.BUILD_START_TIME ? new Date(process.env.BUILD_START_TIME) : new Date();
 
 if (fs.existsSync(cacheDir)) {
   const files = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json"));
@@ -84,8 +83,9 @@ const summary = {
 };
 
 const endTime = new Date();
-const durationMs = endTime.getTime() - startTime.getTime();
-const durationStr = `${Math.floor(durationMs / 60000)}m ${Math.floor((durationMs % 60000) / 1000)}s`;
+// Sum up individual test durations
+const totalTestDurationMs = allSources.reduce((sum, s) => sum + (s.test?.durationMs ?? 0), 0);
+const durationStr = `${Math.floor(totalTestDurationMs / 60000)}m ${Math.floor((totalTestDurationMs % 60000) / 1000)}s`;
 
 const report: BuildReport = {
   timestamp: endTime.toISOString(),
