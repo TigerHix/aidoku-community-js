@@ -1,0 +1,6 @@
+{
+  "registries": [
+    "https://aidoku-community.github.io/sources/index.min.json",
+    "https://raw.githubusercontent.com/suiyuran/aidoku-zh-sources/main/public/index.json"
+  ]
+}

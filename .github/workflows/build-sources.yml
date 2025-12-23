@@ -86,8 +86,11 @@ jobs:
               echo "Testing $SOURCE_ID ($SOURCE_NAME)..."
               
               TEST_START=$(date +%s%3N)
-              TEST_OUT=$(timeout 90 bunx aidoku test all "$SOURCE_ID" --json 2>&1 || echo '{"summary":{"failed":1},"error":"timeout or crash"}')
+              RAW_OUT=$(timeout 90 bunx aidoku test all "$SOURCE_ID" --json 2>&1 || true)
               TEST_TIME=$(($(date +%s%3N) - TEST_START))
+              # Extract JSON from output (skip download/cache messages)
+              TEST_OUT=$(echo "$RAW_OUT" | sed -n '/^{/,$p')
+              [ -z "$TEST_OUT" ] && TEST_OUT='{"summary":{"failed":1},"error":"no json output"}'
               
               if echo "$TEST_OUT" | jq . >/dev/null 2>&1; then
                 PASSED=$(echo "$TEST_OUT" | jq -r '.summary.passed // 0')
