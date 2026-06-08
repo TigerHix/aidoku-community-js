@@ -13,6 +13,7 @@
  */
 
 import { execSync } from "child_process";
+import { createHash } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import type { Registry, RegistrySource } from "@nemu.pm/aidoku-cli/lib/registry";
@@ -25,6 +26,9 @@ const HISTORICAL_COMMITS_PATH = path.join(ROOT_DIR, "data/historical-commits.jso
 const DIST_DIR = path.join(ROOT_DIR, "dist");
 
 const REPOS_DIR = process.env.REPOS_DIR ?? path.join(ROOT_DIR, "repos");
+const PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL ?? "https://tigerhix.github.io/aidoku-community-js";
+const MIRROR_AIX = process.env.MIRROR_AIX === "true";
 const AIDOKU_COMMUNITY_CUTOFF = "2025-06-12";
 
 // Types
@@ -50,8 +54,17 @@ interface AuthorOutput {
   firstCommit: string;
 }
 
+interface ArtifactMetadata {
+  upstreamURL: string;
+  mirroredURL: string;
+  path: string;
+  bytes: number;
+  sha256: string;
+}
+
 interface EnrichedSource extends RegistrySource {
   authors: AuthorOutput[];
+  artifact?: ArtifactMetadata;
 }
 
 interface EnrichedRegistry {
@@ -59,6 +72,61 @@ interface EnrichedRegistry {
   generated: string;
   upstream: string;
   sources: EnrichedSource[];
+}
+
+interface ProcessRegistryOptions {
+  distDir?: string;
+  reposDir?: string;
+  mirrorAix?: boolean;
+  publicBaseUrl?: string;
+  fetch?: typeof fetch;
+}
+
+export function resolveRegistryAssetUrl(registryUrl: string, pathOrUrl: string): string {
+  try {
+    return new URL(pathOrUrl).toString();
+  } catch {
+    return new URL(pathOrUrl, registryUrl).toString();
+  }
+}
+
+function joinUrl(baseUrl: string, ...parts: string[]): string {
+  const normalizedBase = baseUrl.replace(/\/+$/, "");
+  const normalizedParts = parts.map((part) => part.replace(/^\/+|\/+$/g, ""));
+  return [normalizedBase, ...normalizedParts].filter(Boolean).join("/");
+}
+
+function artifactFilename(source: RegistrySource, upstreamURL: string): string {
+  const pathname = new URL(upstreamURL).pathname;
+  return path.posix.basename(pathname) || `${source.id}-v${source.version}.aix`;
+}
+
+async function mirrorAixArtifact(
+  config: RegistryConfig,
+  source: RegistrySource,
+  upstreamURL: string,
+  options: Required<Pick<ProcessRegistryOptions, "distDir" | "publicBaseUrl" | "fetch">>
+): Promise<ArtifactMetadata> {
+  const filename = artifactFilename(source, upstreamURL);
+  const relativePath = path.posix.join(config.id, "sources", filename);
+  const outputPath = path.join(options.distDir, config.id, "sources", filename);
+  const response = await options.fetch(upstreamURL);
+
+  if (!response.ok) {
+    throw new Error(`Failed to mirror ${source.id}: ${response.status}`);
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, bytes);
+
+  return {
+    upstreamURL,
+    mirroredURL: joinUrl(options.publicBaseUrl, relativePath),
+    path: relativePath,
+    bytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 // Cache historical commits data
@@ -191,10 +259,19 @@ function mergeContributors(
   );
 }
 
-function processRegistry(config: RegistryConfig): void {
-  const upstreamPath = path.join(DIST_DIR, config.id, "upstream.json");
-  const outputPath = path.join(DIST_DIR, config.id, "index.json");
-  const minOutputPath = path.join(DIST_DIR, config.id, "index.min.json");
+export async function processRegistry(
+  config: RegistryConfig,
+  options: ProcessRegistryOptions = {}
+): Promise<void> {
+  const distDir = options.distDir ?? DIST_DIR;
+  const reposDir = options.reposDir ?? REPOS_DIR;
+  const mirrorAix = options.mirrorAix ?? MIRROR_AIX;
+  const publicBaseUrl = options.publicBaseUrl ?? PUBLIC_BASE_URL;
+  const fetchImpl = options.fetch ?? fetch;
+
+  const upstreamPath = path.join(distDir, config.id, "upstream.json");
+  const outputPath = path.join(distDir, config.id, "index.json");
+  const minOutputPath = path.join(distDir, config.id, "index.min.json");
 
   if (!fs.existsSync(upstreamPath)) {
     console.error(`Upstream not found: ${upstreamPath}`);
@@ -203,11 +280,11 @@ function processRegistry(config: RegistryConfig): void {
 
   const upstream: Registry = JSON.parse(fs.readFileSync(upstreamPath, "utf-8"));
   const repoName = config.repo.split("/").slice(-2).join("/");
-  const repoPath = path.join(REPOS_DIR, repoName);
+  const repoPath = path.join(reposDir, repoName);
   const repoExists = fs.existsSync(repoPath);
 
   // Get base URL from registry URL
-  const baseUrl = config.url.replace(/\/[^/]+$/, "/");
+  const baseUrl = new URL(".", config.url).toString();
 
   console.log(`\nProcessing ${config.name} (${upstream.sources.length} sources)...`);
   if (!repoExists) {
@@ -227,20 +304,27 @@ function processRegistry(config: RegistryConfig): void {
       authors = mergeContributors(historical, current);
     }
 
+    const upstreamDownloadURL = resolveRegistryAssetUrl(config.url, source.downloadURL);
+    const upstreamIconURL = resolveRegistryAssetUrl(config.url, source.iconURL);
+    const artifact = mirrorAix
+      ? await mirrorAixArtifact(config, source, upstreamDownloadURL, {
+          distDir,
+          publicBaseUrl,
+          fetch: fetchImpl,
+        })
+      : undefined;
+
     enrichedSources.push({
       ...source,
-      // Rewrite relative URLs to absolute
-      downloadURL: source.downloadURL.startsWith("http")
-        ? source.downloadURL
-        : `${baseUrl}${source.downloadURL}`,
-      iconURL: source.iconURL.startsWith("http")
-        ? source.iconURL
-        : `${baseUrl}${source.iconURL}`,
+      downloadURL: artifact?.mirroredURL ?? upstreamDownloadURL,
+      iconURL: upstreamIconURL,
       authors,
+      ...(artifact ? { artifact } : {}),
     });
 
     const authorsInfo = authors.length > 0 ? ` (${authors.length} authors)` : "";
-    console.log(`  ✓ ${source.id}${authorsInfo}`);
+    const artifactInfo = artifact ? `, mirrored ${artifact.bytes} bytes` : "";
+    console.log(`  ✓ ${source.id}${authorsInfo}${artifactInfo}`);
   }
 
   const enriched: EnrichedRegistry = {
@@ -257,16 +341,21 @@ function processRegistry(config: RegistryConfig): void {
   console.log(`  → ${outputPath} (${withAuthors}/${enrichedSources.length} with authors)`);
 }
 
-function main() {
+async function main() {
   const configs: RegistryConfig[] = JSON.parse(
     fs.readFileSync(REGISTRIES_PATH, "utf-8")
   );
 
   for (const config of configs) {
-    processRegistry(config);
+    await processRegistry(config);
   }
 
   console.log("\nDone");
 }
 
-main();
+if (import.meta.main) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

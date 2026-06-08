@@ -22,6 +22,7 @@ interface SourceResult {
   id: string;
   name: string;
   registry?: string;
+  artifact?: ArtifactMetadata;
   test?: {
     status: "pass" | "fail" | "error" | "skipped";
     durationMs?: number;
@@ -35,7 +36,18 @@ interface SourceResult {
 
 interface ChunkResult {
   chunk: number;
+  runtime?: {
+    aidokuJsSha?: string;
+  };
   sources: SourceResult[];
+}
+
+interface ArtifactMetadata {
+  upstreamURL: string;
+  mirroredURL: string;
+  path: string;
+  bytes: number;
+  sha256: string;
 }
 
 interface BuildReport {
@@ -43,71 +55,137 @@ interface BuildReport {
   commit: string;
   runId: string;
   duration: string;
+  runtime: {
+    aidokuJsSha: string;
+    aidokuJsShas: string[];
+  };
   summary: {
     total: number;
     tested: number;
     passed: number;
     failed: number;
+    artifacts: {
+      total: number;
+      mirrored: number;
+    };
   };
   sources: SourceResult[];
+}
+
+interface GenerateBuildReportOptions {
+  cacheDir?: string;
+  distDir?: string;
+  env?: Record<string, string | undefined>;
 }
 
 const TEST_TYPES = ["home", "listings", "search", "details", "chapters", "pages", "image"] as const;
 
 const ROOT_DIR = path.join(import.meta.dirname, "..");
-const cacheDir = path.join(ROOT_DIR, ".cache/build-results");
-const distDir = path.join(ROOT_DIR, "dist");
+const DEFAULT_CACHE_DIR = path.join(ROOT_DIR, ".cache/build-results");
+const DEFAULT_DIST_DIR = path.join(ROOT_DIR, "dist");
 
-const allSources: SourceResult[] = [];
+export function generateBuildReport(options: GenerateBuildReportOptions = {}): BuildReport {
+  const cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR;
+  const distDir = options.distDir ?? DEFAULT_DIST_DIR;
+  const env = options.env ?? process.env;
+  const allSources: SourceResult[] = [];
+  const aidokuJsShas = new Set<string>();
 
-if (fs.existsSync(cacheDir)) {
-  const files = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json"));
-  for (const file of files) {
-    try {
-      const content = fs.readFileSync(path.join(cacheDir, file), "utf-8");
-      const chunk: ChunkResult = JSON.parse(content);
-      allSources.push(...chunk.sources);
-    } catch (e) {
-      console.error(`Error reading ${file}:`, e);
+  if (fs.existsSync(cacheDir)) {
+    const files = fs.readdirSync(cacheDir).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(cacheDir, file), "utf-8");
+        const chunk: ChunkResult = JSON.parse(content);
+        if (chunk.runtime?.aidokuJsSha) {
+          aidokuJsShas.add(chunk.runtime.aidokuJsSha);
+        }
+        allSources.push(...chunk.sources);
+      } catch (e) {
+        console.error(`Error reading ${file}:`, e);
+      }
     }
   }
+
+  const { artifactsBySource, summary: artifactSummary } = loadRegistryArtifacts(distDir);
+  for (const source of allSources) {
+    const artifact = artifactsBySource.get(`${source.registry ?? ""}:${source.id}`);
+    if (artifact) {
+      source.artifact = artifact;
+    }
+  }
+
+  allSources.sort((a, b) => a.id.localeCompare(b.id));
+
+  const summary = {
+    total: allSources.length,
+    tested: allSources.filter((s) => s.test).length,
+    passed: allSources.filter((s) => s.test?.status === "pass").length,
+    failed: allSources.filter((s) => s.test && s.test.status !== "pass" && s.test.status !== "skipped").length,
+    artifacts: artifactSummary,
+  };
+
+  const sortedAidokuJsShas = Array.from(aidokuJsShas).sort();
+  const totalTestDurationMs = allSources.reduce((sum, s) => sum + (s.test?.durationMs ?? 0), 0);
+  const durationStr = `${Math.floor(totalTestDurationMs / 60000)}m ${Math.floor((totalTestDurationMs % 60000) / 1000)}s`;
+
+  const report: BuildReport = {
+    timestamp: new Date().toISOString(),
+    commit: env.GITHUB_SHA || "local",
+    runId: env.GITHUB_RUN_ID || "local",
+    duration: durationStr,
+    runtime: {
+      aidokuJsSha: sortedAidokuJsShas.length === 1
+        ? sortedAidokuJsShas[0]
+        : sortedAidokuJsShas.length > 1
+          ? "mixed"
+          : "unknown",
+      aidokuJsShas: sortedAidokuJsShas,
+    },
+    summary,
+    sources: allSources,
+  };
+
+  fs.mkdirSync(distDir, { recursive: true });
+  fs.writeFileSync(path.join(distDir, "build-report.json"), JSON.stringify(report, null, 2));
+  fs.writeFileSync(path.join(distDir, "build-report.html"), generateHtmlReport(report));
+
+  return report;
 }
 
-allSources.sort((a, b) => a.id.localeCompare(b.id));
+function loadRegistryArtifacts(distDir: string): {
+  artifactsBySource: Map<string, ArtifactMetadata>;
+  summary: { total: number; mirrored: number };
+} {
+  const artifactsBySource = new Map<string, ArtifactMetadata>();
+  const summary = { total: 0, mirrored: 0 };
 
-const summary = {
-  total: allSources.length,
-  tested: allSources.filter((s) => s.test).length,
-  passed: allSources.filter((s) => s.test?.status === "pass").length,
-  failed: allSources.filter((s) => s.test && s.test.status !== "pass" && s.test.status !== "skipped").length,
-};
+  if (!fs.existsSync(distDir)) {
+    return { artifactsBySource, summary };
+  }
 
-const endTime = new Date();
-// Sum up individual test durations
-const totalTestDurationMs = allSources.reduce((sum, s) => sum + (s.test?.durationMs ?? 0), 0);
-const durationStr = `${Math.floor(totalTestDurationMs / 60000)}m ${Math.floor((totalTestDurationMs % 60000) / 1000)}s`;
+  for (const registryId of fs.readdirSync(distDir)) {
+    const indexPath = path.join(distDir, registryId, "index.json");
+    if (!fs.existsSync(indexPath)) continue;
 
-const report: BuildReport = {
-  timestamp: endTime.toISOString(),
-  commit: process.env.GITHUB_SHA || "local",
-  runId: process.env.GITHUB_RUN_ID || "local",
-  duration: durationStr,
-  summary,
-  sources: allSources,
-};
+    try {
+      const registry = JSON.parse(fs.readFileSync(indexPath, "utf-8")) as {
+        sources?: Array<{ id: string; artifact?: ArtifactMetadata }>;
+      };
+      for (const source of registry.sources ?? []) {
+        summary.total++;
+        if (source.artifact) {
+          summary.mirrored++;
+          artifactsBySource.set(`${registryId}:${source.id}`, source.artifact);
+        }
+      }
+    } catch (e) {
+      console.error(`Error reading ${indexPath}:`, e);
+    }
+  }
 
-fs.mkdirSync(distDir, { recursive: true });
-
-fs.writeFileSync(path.join(distDir, "build-report.json"), JSON.stringify(report, null, 2));
-
-const html = generateHtmlReport(report);
-fs.writeFileSync(path.join(distDir, "build-report.html"), html);
-
-console.log(`Build report generated:`);
-console.log(`  Total: ${summary.total}`);
-console.log(`  Tested: ${summary.tested}`);
-console.log(`  Passed: ${summary.passed} ✓`);
-console.log(`  Failed: ${summary.failed} ✗`);
+  return { artifactsBySource, summary };
+}
 
 function getTestResult(src: SourceResult, testName: string): "pass" | "fail" | "skip" {
   const result = src.test?.results?.find((r) => r.test === testName);
@@ -297,6 +375,7 @@ function generateHtmlReport(report: BuildReport): string {
     <div class="meta">
       <span>Commit: <code>${report.commit.slice(0, 7)}</code></span> · 
       <span>Run: <code>#${report.runId}</code></span> · 
+      <span>aidoku-js: <code>${escapeHtml(report.runtime.aidokuJsSha.slice(0, 12))}</code></span> ·
       <span>Duration: <strong>${report.duration}</strong></span> · 
       <span>${new Date(report.timestamp).toLocaleString()}</span>
     </div>
@@ -317,6 +396,10 @@ function generateHtmlReport(report: BuildReport): string {
       <div class="stat failed">
         <div class="stat-value">${report.summary.failed}</div>
         <div class="stat-label">Failed</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${report.summary.artifacts.mirrored}/${report.summary.artifacts.total}</div>
+        <div class="stat-label">Mirrored Artifacts</div>
       </div>
     </div>
     
@@ -372,4 +455,16 @@ function escapeHtml(str: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+if (import.meta.main) {
+  const report = generateBuildReport();
+  console.log(`Build report generated:`);
+  console.log(`  Total: ${report.summary.total}`);
+  console.log(`  Tested: ${report.summary.tested}`);
+  console.log(`  Passed: ${report.summary.passed} ✓`);
+  console.log(`  Failed: ${report.summary.failed} ✗`);
+  console.log(
+    `  Mirrored artifacts: ${report.summary.artifacts.mirrored}/${report.summary.artifacts.total}`
+  );
 }

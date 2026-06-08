@@ -54,6 +54,7 @@ jobs:
       - name: Clone and build aidoku-js
         run: |
           git clone --depth=1 https://github.com/nemu-pm/aidoku-js.git .aidoku-js
+          echo "AIDOKU_JS_SHA=$(git -C .aidoku-js rev-parse HEAD)" >> "$GITHUB_ENV"
           cd .aidoku-js/runtime && bun install && bun run build && bun link
           cd ../cli && bun install && bun link @nemu.pm/aidoku-runtime
       
@@ -73,7 +74,7 @@ jobs:
         run: |
           mkdir -p .cache/build-results
           RESULTS_FILE=".cache/build-results/chunk-${{ matrix.chunk }}.json"
-          echo '{"chunk": ${{ matrix.chunk }}, "sources": [' > "$RESULTS_FILE"
+          printf '{"chunk": %s, "runtime": {"aidokuJsSha": "%s"}, "sources": [' '${{ matrix.chunk }}' "$AIDOKU_JS_SHA" > "$RESULTS_FILE"
           FIRST=true
           
           # Collect all sources from all registries
@@ -201,6 +202,8 @@ jobs:
       - name: Post-process registries
         env:
           REPOS_DIR: ${{ github.workspace }}/repos
+          MIRROR_AIX: "true"
+          PUBLIC_BASE_URL: "https://tigerhix.github.io/aidoku-community-js"
         run: bun run postprocess
       
       - name: Check for registry data
