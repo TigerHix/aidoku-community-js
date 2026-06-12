@@ -95,4 +95,56 @@ describe("postprocess registry", () => {
       sha256: createHash("sha256").update(aixBytes).digest("hex"),
     });
   });
+
+  it("falls back to the upstream URL when mirroring fails", async () => {
+    const root = createTempDir();
+    const distDir = path.join(root, "dist");
+    const registryDir = path.join(distDir, "test-registry");
+    const reposDir = path.join(root, "repos");
+    fs.mkdirSync(registryDir, { recursive: true });
+    fs.mkdirSync(reposDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(registryDir, "upstream.json"),
+      JSON.stringify({
+        name: "Test Registry",
+        sources: [
+          {
+            id: "source.broken",
+            name: "Broken Source",
+            version: 1,
+            iconURL: "icons/source.broken.png",
+            downloadURL: "sources/source.broken-v1.aix",
+            languages: ["en"],
+          },
+        ],
+      })
+    );
+
+    const fetchMock = mock(async () => new Response(null, { status: 404 }));
+
+    await processRegistry(
+      {
+        id: "test-registry",
+        name: "Test Registry",
+        url: "https://upstream.example/root/index.min.json",
+        repo: "https://github.com/example/sources",
+        hasHistoricalCommits: false,
+      },
+      {
+        distDir,
+        reposDir,
+        mirrorAix: true,
+        publicBaseUrl: "https://pages.example/aidoku-community-js",
+        fetch: fetchMock,
+      }
+    );
+
+    const index = JSON.parse(fs.readFileSync(path.join(registryDir, "index.json"), "utf-8"));
+    const [source] = index.sources;
+    expect(source.downloadURL).toBe(
+      "https://upstream.example/root/sources/source.broken-v1.aix"
+    );
+    expect(source.artifact).toBeUndefined();
+  });
 });

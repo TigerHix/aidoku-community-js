@@ -203,8 +203,10 @@ jobs:
         env:
           REPOS_DIR: ${{ github.workspace }}/repos
           MIRROR_AIX: "true"
-          PUBLIC_BASE_URL: "https://tigerhix.github.io/aidoku-community-js"
-        run: bun run postprocess
+        run: |
+          OWNER="$(echo "${GITHUB_REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')"
+          export PUBLIC_BASE_URL="https://${OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          bun run postprocess
       
       - name: Check for registry data
         id: check

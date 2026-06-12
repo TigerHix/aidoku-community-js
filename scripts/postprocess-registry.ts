@@ -306,13 +306,21 @@ export async function processRegistry(
 
     const upstreamDownloadURL = resolveRegistryAssetUrl(config.url, source.downloadURL);
     const upstreamIconURL = resolveRegistryAssetUrl(config.url, source.iconURL);
-    const artifact = mirrorAix
-      ? await mirrorAixArtifact(config, source, upstreamDownloadURL, {
+
+    // A failed mirror must not fail the whole publish: fall back to the
+    // upstream URL so one flaky artifact can't take down every registry.
+    let artifact: ArtifactMetadata | undefined;
+    if (mirrorAix) {
+      try {
+        artifact = await mirrorAixArtifact(config, source, upstreamDownloadURL, {
           distDir,
           publicBaseUrl,
           fetch: fetchImpl,
-        })
-      : undefined;
+        });
+      } catch (e) {
+        console.error(`  ✗ ${source.id}: mirror failed, keeping upstream URL (${e instanceof Error ? e.message : e})`);
+      }
+    }
 
     enrichedSources.push({
       ...source,
