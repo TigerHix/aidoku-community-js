@@ -6,7 +6,8 @@
   "scripts": {
     "fetch": "bun scripts/fetch-upstream.ts",
     "postprocess": "bun scripts/postprocess-registry.ts",
-    "report": "bun scripts/generate-build-report.ts"
+    "report": "bun scripts/generate-build-report.ts",
+    "test": "bun test"
   },
   "devDependencies": {
     "@nemu.pm/aidoku-cli": "latest",
